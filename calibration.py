@@ -3,187 +3,184 @@ import os
 import cv2
 import numpy as np
 import glob
-import logging
+import matplotlib.pyplot as plt
 
-logging.basicConfig(
-    level=logging.DEBUG,
-    format='[%(levelname)s] %(message)s'
-)
-
-original_img_dir = os.path.join(os.getcwd(), 'data')
-processed_img_dir = os.path.join(os.getcwd(), 'data2')
-
-object_points = np.zeros((6 * 7, 3), np.float32)  # 世界坐标系点
-object_points[:, :2] = np.mgrid[0:7, 0:6].T.reshape(-1, 2)  # 将世界坐标系建在标定板上，所有点的Z坐标全部为0，所以只需要赋值x和y
+IMAGE_DIR = os.path.join(os.getcwd(), 'image')
 
 
-def image_calibration():
-    """读取标定图片"""
-    img_count = 0
-    images = glob.glob("{0}/*.jpg".format(original_img_dir))
-
-    objp = np.zeros((6*7, 3), np.float32)
-
-    objp[:, :2] = np.mgrid[0:7, 0:6].T.reshape(-1, 2)  # 将世界坐标系建在标定板上，所有点的Z坐标全部为0，所以只需要赋值x和y
-
-    # 设置寻找亚像素角点的参数，采用的停止准则是最大循环次数30和最大误差容限0.001
-    criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001)
-
-    # 景物点坐标
-    obj_points = []
-
-    # 图像点坐标
-    img_points = []
-
-    cv2.namedWindow('original_img', cv2.WINDOW_NORMAL)
-
-    for image in images:
-        img = cv2.imread(image)
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        size = gray.shape[::-1]
-
-        ret, corners = cv2.findChessboardCorners(gray, (6, 7))
-
-        if ret is True:
-            obj_points.append(objp)
-
-            # 进一步提取亚像素角点
-            corners2 = cv2.cornerSubPix(gray, corners, (5, 5), (-1, -1), criteria)
-
-            if corners2 is not None:
-                img_points.append(corners2)
-            else:
-                img_points.append(corners)
-
-            gray = cv2.drawChessboardCorners(gray, (6, 7), corners, patternWasFound=False)
-
-        cv2.imshow('original_img', gray)
-
-        img_count += 1
-        img_name = 'processed_img_{}.jpg'.format(img_count)
-        cv2.imwrite(os.path.join(processed_img_dir, img_name), gray)
-
-        cv2.waitKey(100)
-
-    ret, mtx, dist, rvecs, tvecs = cv2.calibrateCamera(obj_points, img_points, size, None, None)
-
-    return mtx, dist, rvecs, tvecs
+class CalibrateException(Exception):
+    pass
 
 
-def calibrate(img):
-    """
-    图像进行标定
-    参数：图像
-    返回：内参矩阵、畸变系数、旋转向量与平移向量
-    """
+# 标定板信息
+class ChessBoardInfo(object):
 
-    criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001)      # 设置寻找亚像素角点的参数，采用的停止准则是最大循环次数30和最大误差容限0.001
+    def __init__(self, n_cols=0, n_rows=0):
+        self.n_cols = n_cols
+        self.n_rows = n_rows
+        self.size = (n_rows, n_cols)
 
-    obj_points = []                                                                 # 景物点坐标
-    img_points = []                                                                 # 图像点坐标
 
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)                                    # 转为灰度图
-
-    size = gray.shape[::-1]
-
-    ret, corners = cv2.findChessboardCorners(gray, (7, 6), None)                    # 提取角点
-
-    if ret is True:
-        obj_points.append(object_points)
-
-        corners2 = cv2.cornerSubPix(gray, corners, (5, 5), (-1, -1), criteria)      # 进一步提取亚像素角点
-
-        if corners2 is not None:
-            corners = corners2
-
-        img_points.append(corners)
-
-        ret, mtx, dist, rvecs, tvecs = cv2.calibrateCamera(obj_points, img_points, size, None, None)
-
-        return corners, ret, mtx, dist, rvecs, tvecs
+def _get_corners(img, broad):
+    img = cv2.imread(img)
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    (ok, corners) = cv2.findChessboardCorners(img, (broad.n_cols, broad.n_rows))
+    if not ok:
+        return ok, corners
     else:
-        return False
+        radius = 5
+        cv2.cornerSubPix(gray, corners, (radius, radius), (-1, -1),
+                         (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.1))
+        return ok, corners
 
 
-def operate(frame):
+class Calibrator(object):
+    """
+    使用findChessboardCorners找到角点
 
-    img_count = 0                                                                   # 照片张数
-    key = cv2.waitKey(1)
+    :return (ok, corners)
+    """
 
-    if key == ord('q'):
-        return False
-    elif key == ord('g'):
-        img_count += 1
-        img_name = 'original_img_{}.jpg'.format(img_count)
-        cv2.imwrite(os.path.join(original_img_dir, img_name), frame)
-        logging.debug("拍{0}张".format(img_count))
+    def __init__(self, board):
+        self._board = board
+        self.size = None
+        self.count = 0
 
+    def get_corners(self, img):
+        ok, corners = _get_corners(img, self._board)
+        if ok:
+            return ok, corners
+        else:
+            return False, None
 
-def draw_point(img, corners):
-    """ 绘制内角 """
+    def collect_corners(self, images):
 
-    for point in corners:
-        point = tuple(point[0])
-        cv2.circle(img=img, center=point, radius=3, color=(0, 0, 255), thickness=-1)
+        corners = [self.get_corners(img) for img in images]
 
-    return img
+        good_corners = []
 
+        for (ok, corner) in corners:
+            if ok:
+                self.count += 1
+                good_corners.append(corner)
 
-def draw_axis(img, rvecs, tvecs, mtx, dist, corners):
+        if not good_corners:
+            raise CalibrateException("No corners found in images!")
+        else:
 
-    axis = np.float32([[3, 0, 0], [0, 3, 0], [0, 0, -3]]).reshape(-1, 3)
-    rvecs = np.array(rvecs)
-    tvecs = np.array(tvecs)
+            self.size = (cv2.imread(images[0]).shape[0], cv2.imread(images[0]).shape[1])
+            return good_corners
 
-    imgpts, jac = cv2.projectPoints(axis, rvecs, tvecs, mtx, dist)
-    corner = tuple(corners[0].ravel())
-    img = cv2.line(img, corner, tuple(imgpts[0].ravel()), (255, 0, 0), 5)
-    img = cv2.line(img, corner, tuple(imgpts[1].ravel()), (0, 255, 0), 5)
-    img = cv2.line(img, corner, tuple(imgpts[2].ravel()), (0, 0, 255), 5)
-    return img
+    def get_object_points(self):
 
+        object_points = []
+        if self.count is 0:
+            raise CalibrateException("No images!")
 
-def get_image():
+        for i in range(self.count):
+            object_point = np.zeros((self._board.n_cols * self._board.n_rows, 3), np.float32)
+            object_point[:, :2] = np.mgrid[0:7, 0:6].T.reshape(-1, 2)
+            object_points.append(object_point)
+        return object_points
 
-    cv2.namedWindow('cap', cv2.WINDOW_NORMAL)                                       # 创建窗体
+    def cal_param(self, img_points):
+        """
+        计算相机内外参
+        :return: ok, mtx, dist, rvecs, tvecs
+        """
+        obj_points = self.get_object_points()
 
-    cap = cv2.VideoCapture(1)                                                       # 打开相机
+        ok, mtx, dist, rvecs, tvecs = cv2.calibrateCamera(
+            obj_points,
+            img_points,
+            self.size,
+            None,
+            None
+        )
 
-    while True:
+        if not ok:
+            return False, None, None, None, None
+        else:
+            return ok, mtx, dist, rvecs, tvecs
 
-        ret, frame = cap.read()                                                     # 获取视频流q
+    def pose_estimation(self, mtx, dist, rvecs, tvecs):
+        """
+        cvProjectPoints2的函数计算反投影，返回经反投影后像素点的标
+        :return: img_points
+        """
+        img_points = []
+        for i in range(self.count):
+            object_point = np.zeros((self._board.n_cols * self._board.n_rows, 3), np.float32)
+            object_point[:, :2] = np.mgrid[0:self._board.n_cols, 0:self._board.n_rows].T.reshape(-1, 2)
+            rvec = np.array(rvecs[i])
+            tvec = np.array(tvecs[i])
 
-        frame = cv2.resize(frame, (400, 300))                                         # 图像缩放至400*300
+            img_point, jac = cv2.projectPoints(object_point, rvec, tvec, mtx, dist)
+            img_points.append(img_point)
+        return img_points
 
-        if calibrate(frame) is not False:
-            corners, ret, mtx, dist, rvecs, tvecs = calibrate(frame)
+    def draw_chart(self, project_points, img_points):
+        """
+        画出偏差图
+        """
+        x = np.array(range(self.count*self._board.n_rows*self._board.n_cols)) + 1
+        y = project_points - img_points
+        y_x = np.array(y.T[-1:]).flatten()
+        y_y = np.array(y.T[:-1]).flatten()
 
-            frame = draw_point(frame, corners)
+        plt.ylim(-1.0, 1.0)                                                         # 设置纵轴上下限
 
-            frame = draw_axis(frame, rvecs, tvecs, mtx, dist, corners)
+        plt.scatter(x, y_x)
+        plt.scatter(x, y_y)
+        plt.title('x&y offset')
 
-        if operate(frame) is False:
-            break
+        plt.show()
 
-        cv2.imshow("cap", frame)
+    @ staticmethod
+    def get_intrinsic(mtx):
+        """
+        获取内参
+        """
+        mtx = np.column_stack((mtx, np.zeros((3, 1))))
+        return mtx
 
-    cap.release()
-    cv2.destroyAllWindows()
+    @ staticmethod
+    def get_extrinsics(rvecs, tvecs):
+        """
+        返回外参
+        :param rvecs: 旋转向量组
+        :param tvecs: 位移向量组
+        :return: 外参数模型组
+        """
+        exteriores = []
+        for rvec, tvec in zip(rvecs, tvecs):
+            P = tvec
+            R = cv2.Rodrigues(np.array(rvec))
+            exterior = np.column_stack((np.array(R[0]), P))
+            exterior = np.row_stack((exterior, np.zeros((1, 4))))
+            exteriores.append(exterior)
+
+        return exteriores
 
 
 if __name__ == '__main__':
-    # get_image()
-    mtx, dist, rvecs, tvecs = image_calibration()
+    board = ChessBoardInfo(n_cols=7, n_rows=6)
+    calibrator = Calibrator(board)
+    corners = calibrator.collect_corners(glob.glob('{0}/*.jpg'.format(IMAGE_DIR)))
+    ok, mtx, dist, rvecs, tvecs = calibrator.cal_param(corners)
 
-    # 内参数矩阵
-    print("内参数矩阵：\n {0}".format(mtx.reshape(3, 3)))
+    # 内参矩阵
+    intrinsic = calibrator.get_intrinsic(mtx)
 
-    # 畸变系数
-    print("畸变系数：\n {0}".format(dist))
+    # 外参数矩阵
+    extrinsics = calibrator.get_extrinsics(rvecs, tvecs)
 
-    # 旋转向量
-    print("旋转向量：\n {0}".format(np.array(rvecs).reshape(-1, 3)))
+    # 内参矩阵与外参矩阵的乘积
+    M = np.matrix(intrinsic).dot(extrinsics[0])
 
-    # 平移向量
-    print("平移向量：\n {0:10}".format(np.array(tvecs).reshape(-1, 3)))
+    # 实际图像坐标
+    camera_pose = np.matrix(np.array([1, 1, 0, 1])).T
+    u, v, z = np.matrix(M).dot(camera_pose)
+    print(u/z, v/z)
 
+    print(corners[0].reshape((board.n_rows, board.n_cols, 2)))
